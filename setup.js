@@ -11,6 +11,8 @@ import { fileURLToPath } from 'url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const SERVER_PATH = resolve(__dirname, 'src', 'index.js')
+const PROMPT_HOOK_PATH = resolve(__dirname, 'src', 'prompt-hook.js')
+const PROMPT_HOOK_COMMAND = `node ${PROMPT_HOOK_PATH}`
 
 const CLAUDE_JSON_PATH = join(homedir(), '.claude.json')
 const SETTINGS_PATH = join(homedir(), '.claude', 'settings.json')
@@ -107,6 +109,31 @@ function checkDepsInstalled() {
   }
 }
 
+function unregisterPromptHook() {
+  const data = readJson(SETTINGS_PATH)
+  if (data === null || !Array.isArray(data.hooks?.UserPromptSubmit)) {
+    console.log('  - UserPromptSubmit hook not registered (no change)')
+    return true
+  }
+
+  const before = data.hooks.UserPromptSubmit.length
+  data.hooks.UserPromptSubmit = data.hooks.UserPromptSubmit.filter(
+    entry => !entry.hooks?.some(h => h.type === 'command' && h.command === PROMPT_HOOK_COMMAND)
+  )
+
+  if (data.hooks.UserPromptSubmit.length === before) {
+    console.log('  - UserPromptSubmit hook not registered (no change)')
+    return true
+  }
+
+  if (data.hooks.UserPromptSubmit.length === 0) delete data.hooks.UserPromptSubmit
+  if (Object.keys(data.hooks).length === 0) delete data.hooks
+
+  writeJson(SETTINGS_PATH, data)
+  console.log(`  + Removed UserPromptSubmit hook from ${SETTINGS_PATH}`)
+  return true
+}
+
 function unregisterMcpServer() {
   const data = readJson(CLAUDE_JSON_PATH)
   if (data === null) return false
@@ -117,6 +144,37 @@ function unregisterMcpServer() {
   delete data.mcpServers.mdify
   writeJson(CLAUDE_JSON_PATH, data)
   console.log('  + Removed mcpServers.mdify')
+  return true
+}
+
+function registerPromptHook() {
+  ensureDir(SETTINGS_PATH)
+  const data = readJson(SETTINGS_PATH) ?? {}
+
+  const hooks = (data.hooks ??= {})
+  const userPromptSubmit = (hooks.UserPromptSubmit ??= [])
+
+  const alreadyRegistered = userPromptSubmit.some(
+    entry => entry.hooks?.some(h => h.type === 'command' && h.command === PROMPT_HOOK_COMMAND)
+  )
+
+  if (alreadyRegistered) {
+    console.log('  - UserPromptSubmit hook already registered (no change)')
+    return true
+  }
+
+  userPromptSubmit.push({
+    hooks: [
+      {
+        type: 'command',
+        command: PROMPT_HOOK_COMMAND,
+        timeout: 30
+      }
+    ]
+  })
+
+  writeJson(SETTINGS_PATH, data)
+  console.log(`  + Added UserPromptSubmit hook to ${SETTINGS_PATH}`)
   return true
 }
 
@@ -158,12 +216,20 @@ function install() {
   console.log('\nRegistering PreToolUse hook in ~/.claude/settings.json ...')
   const hookOk = registerHook()
 
-  if (mcpOk && hookOk) {
+  console.log('\nRegistering UserPromptSubmit hook in ~/.claude/settings.json ...')
+  const promptHookOk = registerPromptHook()
+
+  if (mcpOk && hookOk && promptHookOk) {
     console.log('\nDone! Restart Claude Code, then run /mcp to confirm mdify is connected.\n')
     console.log('How it works:')
-    console.log('  Attach or mention any PDF, DOCX, XLSX, or CSV file in Claude Code.')
-    console.log('  mdify intercepts the Read call, converts to markdown, and redirects Claude')
-    console.log('  to read the compact version — transparently, with no extra steps.\n')
+    console.log('  1. Read hook: use the Read tool on any PDF, DOCX, XLSX, or CSV file.')
+    console.log('     mdify intercepts, converts to markdown, and redirects Claude to the')
+    console.log('     compact version - transparently, with no extra steps.')
+    console.log('  2. Prompt hook: paste a full file path (/path/to/file.xlsx or')
+    console.log('     ~/Downloads/file.pdf) directly in your message. mdify detects and')
+    console.log('     converts it before Claude processes the prompt - no Read tool needed.')
+    console.log('  3. Manual call: invoke mcp__mdify__convert_to_markdown with')
+    console.log('     {"file_path": "/path/to/file.xlsx"} to convert on demand.\n')
   } else {
     console.log('\nSetup finished with warnings. Check the messages above.\n')
   }
@@ -178,7 +244,10 @@ function uninstall() {
   console.log('\nRemoving PreToolUse hook from ~/.claude/settings.json ...')
   const hookOk = unregisterHook()
 
-  if (mcpOk && hookOk) {
+  console.log('\nRemoving UserPromptSubmit hook from ~/.claude/settings.json ...')
+  const promptHookOk = unregisterPromptHook()
+
+  if (mcpOk && hookOk && promptHookOk) {
     console.log('\nDone! Restart Claude Code to apply.')
     console.log('To also clear cached conversions: rm -rf ~/.claude-md-cache\n')
   } else {
@@ -193,8 +262,8 @@ if (flag === '--uninstall' || flag === 'uninstall') {
   uninstall()
 } else if (flag === '--help' || flag === '-h') {
   console.log('\nUsage: node setup.js [--uninstall]\n')
-  console.log('  (no args)     install: register the MCP server and Read hook')
-  console.log('  --uninstall   remove the MCP server and Read hook\n')
+  console.log('  (no args)     install: register the MCP server, Read hook, and UserPromptSubmit hook')
+  console.log('  --uninstall   remove the MCP server, Read hook, and UserPromptSubmit hook\n')
 } else {
   install()
 }

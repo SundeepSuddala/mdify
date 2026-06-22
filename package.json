@@ -1,12 +1,16 @@
 {
-  "name": "mdify",
-  "version": "1.0.0",
-  "description": "MCP server that converts PDF, DOCX, XLSX and CSV files to markdown before Claude Code reads them — cuts token usage by up to 98%.",
+  "name": "mdify-mcp",
+  "version": "1.0.1",
+  "description": "MCP server that converts PDF, DOCX, XLSX and CSV files to markdown before Claude Code reads them - cuts token usage by up to 98%.",
   "type": "module",
   "main": "src/index.js",
   "bin": {
     "mdify-setup": "./setup.js"
   },
+  "files": [
+    "src/",
+    "setup.js"
+  ],
   "scripts": {
     "start": "node src/index.js",
     "setup": "node setup.js",
@@ -23,7 +27,16 @@
     "pdf",
     "docx"
   ],
+  "author": "Sundeep Suddala",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SundeepSuddala/mdify.git"
+  },
+  "homepage": "https://github.com/SundeepSuddala/mdify#readme",
+  "bugs": {
+    "url": "https://github.com/SundeepSuddala/mdify/issues"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "mammoth": "^1.8.0",
