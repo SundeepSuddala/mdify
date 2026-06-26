@@ -61,7 +61,7 @@ enterprise segment. Operating margins improved to 18.4% from 14.2%...
 ## Installation
 
 ```bash
-git clone https://github.com/your-username/mdify
+git clone https://github.com/sundeepsuddala/mdify
 cd mdify
 npm install
 node setup.js
