@@ -8,14 +8,22 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
 import { resolve, dirname, join } from 'path'
 import { homedir } from 'os'
 import { fileURLToPath } from 'url'
+import { execSync } from 'child_process'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const SERVER_PATH = resolve(__dirname, 'src', 'index.js')
 const PROMPT_HOOK_PATH = resolve(__dirname, 'src', 'prompt-hook.js')
-const PROMPT_HOOK_COMMAND = `node ${PROMPT_HOOK_PATH}`
+const PROMPT_HOOK_COMMAND = `${process.execPath} ${PROMPT_HOOK_PATH}`
 
 const CLAUDE_JSON_PATH = join(homedir(), '.claude.json')
 const SETTINGS_PATH = join(homedir(), '.claude', 'settings.json')
+
+const MDIFY_PORT = Number(process.env.MDIFY_PORT || 7201)
+const MDIFY_URL = `http://localhost:${MDIFY_PORT}/mcp`
+const PLIST_LABEL = 'com.mdify.server'
+const PLIST_TEMPLATE_PATH = resolve(__dirname, 'launchd', `${PLIST_LABEL}.plist.template`)
+const PLIST_DEST_PATH = join(homedir(), 'Library', 'LaunchAgents', `${PLIST_LABEL}.plist`)
+const LOG_DIR = join(homedir(), 'Library', 'Logs')
 
 function readJson(path) {
   if (!existsSync(path)) return {}
@@ -44,25 +52,95 @@ function checkNodeVersion() {
   }
 }
 
+function hasClaudeCli() {
+  try {
+    execSync('claude --version', { stdio: 'ignore' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+function startLaunchdService() {
+  if (process.platform !== 'darwin') {
+    console.log('  - launchd is macOS-only; skipping background service.')
+    console.log(`    Run manually: ${process.execPath} ${SERVER_PATH} --transport streamable-http --host localhost --port ${MDIFY_PORT}`)
+    return true
+  }
+
+  if (!existsSync(PLIST_TEMPLATE_PATH)) {
+    console.error(`  ! Missing launchd template: ${PLIST_TEMPLATE_PATH}`)
+    return false
+  }
+
+  ensureDir(PLIST_DEST_PATH)
+  mkdirSync(LOG_DIR, { recursive: true })
+
+  const template = readFileSync(PLIST_TEMPLATE_PATH, 'utf8')
+  const nodeDir = dirname(process.execPath)
+  const rendered = template
+    .replaceAll('__NODE__', process.execPath)
+    .replaceAll('__SERVER_JS__', SERVER_PATH)
+    .replaceAll('__WORKDIR__', __dirname)
+    .replaceAll('__PORT__', String(MDIFY_PORT))
+    .replaceAll('__EXTRA_PATH__', nodeDir)
+    .replaceAll('__LOG_DIR__', LOG_DIR)
+
+  writeFileSync(PLIST_DEST_PATH, rendered, 'utf8')
+
+  const uid = execSync('id -u').toString().trim()
+  try {
+    execSync(`launchctl bootout gui/${uid} ${PLIST_DEST_PATH}`, { stdio: 'ignore' })
+  } catch {
+    // not loaded yet - fine
+  }
+  execSync(`launchctl bootstrap gui/${uid} ${PLIST_DEST_PATH}`)
+
+  console.log(`  + Service running: ${PLIST_LABEL} -> ${MDIFY_URL}`)
+  console.log(`    Logs: ${join(LOG_DIR, 'mdify.log')}`)
+  return true
+}
+
+function stopLaunchdService() {
+  if (process.platform !== 'darwin') return true
+  const uid = execSync('id -u').toString().trim()
+  try {
+    execSync(`launchctl bootout gui/${uid} ${PLIST_DEST_PATH}`, { stdio: 'ignore' })
+    console.log(`  + Stopped and unloaded ${PLIST_LABEL}`)
+  } catch {
+    console.log(`  - ${PLIST_LABEL} not loaded (no change)`)
+  }
+  return true
+}
+
 function registerMcpServer() {
+  if (hasClaudeCli()) {
+    const listed = execSync('claude mcp list', { stdio: ['ignore', 'pipe', 'ignore'] }).toString()
+    if (listed.includes('mdify')) {
+      console.log('  - MCP server already registered (no change)')
+      return true
+    }
+    execSync(`claude mcp add --transport http mdify ${MDIFY_URL} -s user`, { stdio: 'inherit' })
+    console.log(`  + Registered via 'claude mcp add' (http, ${MDIFY_URL})`)
+    return true
+  }
+
+  // Fallback: merge directly into ~/.claude.json
+  console.error("  ! 'claude' CLI not found - falling back to direct ~/.claude.json edit.")
   const data = readJson(CLAUDE_JSON_PATH)
   if (data === null) return false
 
   const existing = data.mcpServers?.mdify
-  if (existing?.args?.[0] === SERVER_PATH) {
+  if (existing?.url === MDIFY_URL) {
     console.log('  - MCP server already registered (no change)')
     return true
   }
 
   data.mcpServers = data.mcpServers ?? {}
-  data.mcpServers.mdify = {
-    type: 'stdio',
-    command: 'node',
-    args: [SERVER_PATH]
-  }
+  data.mcpServers.mdify = { type: 'http', url: MDIFY_URL }
 
   writeJson(CLAUDE_JSON_PATH, data)
-  console.log(`  + Added mcpServers.mdify -> ${SERVER_PATH}`)
+  console.log(`  + Added mcpServers.mdify -> ${MDIFY_URL}`)
   return true
 }
 
@@ -135,6 +213,16 @@ function unregisterPromptHook() {
 }
 
 function unregisterMcpServer() {
+  if (hasClaudeCli()) {
+    try {
+      execSync('claude mcp remove mdify -s user', { stdio: 'ignore' })
+      console.log('  + Removed mdify via claude mcp remove')
+      return true
+    } catch {
+      // not registered via CLI scope - fall through to direct edit
+    }
+  }
+
   const data = readJson(CLAUDE_JSON_PATH)
   if (data === null) return false
   if (!data.mcpServers?.mdify) {
@@ -210,7 +298,10 @@ function install() {
   checkNodeVersion()
   checkDepsInstalled()
 
-  console.log('Registering MCP server in ~/.claude.json ...')
+  console.log('Starting mdify as a background service ...')
+  const serviceOk = startLaunchdService()
+
+  console.log('\nRegistering MCP server in ~/.claude.json ...')
   const mcpOk = registerMcpServer()
 
   console.log('\nRegistering PreToolUse hook in ~/.claude/settings.json ...')
@@ -219,7 +310,7 @@ function install() {
   console.log('\nRegistering UserPromptSubmit hook in ~/.claude/settings.json ...')
   const promptHookOk = registerPromptHook()
 
-  if (mcpOk && hookOk && promptHookOk) {
+  if (serviceOk && mcpOk && hookOk && promptHookOk) {
     console.log('\nDone! Restart Claude Code, then run /mcp to confirm mdify is connected.\n')
     console.log('How it works:')
     console.log('  1. Read hook: use the Read tool on any PDF, DOCX, XLSX, or CSV file.')
@@ -238,7 +329,10 @@ function install() {
 function uninstall() {
   console.log('\nmdify uninstall\n')
 
-  console.log('Removing MCP server from ~/.claude.json ...')
+  console.log('Stopping background service ...')
+  const serviceOk = stopLaunchdService()
+
+  console.log('\nRemoving MCP server from ~/.claude.json ...')
   const mcpOk = unregisterMcpServer()
 
   console.log('\nRemoving PreToolUse hook from ~/.claude/settings.json ...')
@@ -247,7 +341,7 @@ function uninstall() {
   console.log('\nRemoving UserPromptSubmit hook from ~/.claude/settings.json ...')
   const promptHookOk = unregisterPromptHook()
 
-  if (mcpOk && hookOk && promptHookOk) {
+  if (serviceOk && mcpOk && hookOk && promptHookOk) {
     console.log('\nDone! Restart Claude Code to apply.')
     console.log('To also clear cached conversions: rm -rf ~/.claude-md-cache\n')
   } else {
